@@ -39,6 +39,71 @@
 #
 # -----------------------------------------------------------------------------
 
+# Detect OS for platform-specific commands
+OS_TYPE="$(uname -s)"
+case "$OS_TYPE" in
+    Darwin*) IS_MACOS=1 ;;
+    *)       IS_MACOS=0 ;;
+esac
+
+# Portable sed in-place edit (macOS requires '' after -i, Linux doesn't)
+sed_inplace() {
+    if [ "$IS_MACOS" -eq 1 ]; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
+# Portable xargs with sed -i (for multiple files)
+xargs_sed_inplace() {
+    local sed_script="$1"
+    shift
+    if [ "$IS_MACOS" -eq 1 ]; then
+        xargs sed -i '' -f "$sed_script"
+    else
+        xargs sed -i -f "$sed_script"
+    fi
+}
+
+# Portable download function (prefer curl on macOS, wget on Linux)
+download_file() {
+    local url="$1"
+    local output_dir="$2"
+    local filename=$(basename "$url")
+    
+    if command -v curl &>/dev/null; then
+        echo "[>] Using curl to download..."
+        curl -L --progress-bar -o "$output_dir/$filename" "$url"
+    elif command -v wget &>/dev/null; then
+        wget "$url" -q --show-progress -P "$output_dir"
+    else
+        echo "[!] Neither curl nor wget found! Please install one."
+        exit 1
+    fi
+}
+
+# Portable download and output to stdout
+download_stdout() {
+    local url="$1"
+    if command -v curl &>/dev/null; then
+        curl -sL "$url"
+    elif command -v wget &>/dev/null; then
+        wget -q -O - "$url"
+    else
+        echo "[!] Neither curl nor wget found!" >&2
+        exit 1
+    fi
+}
+
+# Portable cp with parent directories (macOS doesn't have cp --parents)
+cp_with_parents() {
+    local src="$1"
+    local dest_base="$2"
+    local dest_dir=$(dirname "$dest_base/$src")
+    mkdir -p "$dest_dir"
+    cp "$src" "$dest_dir/"
+}
 
 VERSION="1.1"
 echo -e "[*] \033[1mapk.sh v$VERSION \033[0m"
@@ -55,7 +120,8 @@ print_(){
 }
 print_ "[*] DEBUG is TRUE"
 
-APKTOOL_VER=`wget https://api.github.com/repos/iBotPeaches/Apktool/releases/latest -q -O - | grep -Po "tag_name\": \"v\K.*?(?=\")"`
+# Get latest apktool version (portable - no grep -P)
+APKTOOL_VER=$(download_stdout "https://api.github.com/repos/iBotPeaches/Apktool/releases/latest" | sed -n 's/.*"tag_name": "v\([^"]*\)".*/\1/p')
 APKTOOL_PATH="$APK_SH_HOME/apktool_$APKTOOL_VER.jar"
 # try local apktool without accessing internet
 
@@ -92,16 +158,22 @@ check_dexpatch(){
         DEXPATCH_DOWNLOAD_URL="https://github.com/ax/DEXPatch/releases/download/v0.1/dexpatch-0.1.jar"
         echo "[!] No DEXpatch found!"
 		echo "[>] Downloading DEXpatch from $DEXPATCH_DOWNLOAD_URL"
-		wget $DEXPATCH_DOWNLOAD_URL -q --show-progress -P $APK_SH_HOME 
+		download_file "$DEXPATCH_DOWNLOAD_URL" "$APK_SH_HOME"
     fi
 }
 
 install_cmdlinetools() {
-	CMDLINE_TOOLS_DOWNLOAD_URL="https://dl.google.com/android/repository/commandlinetools-linux-9123335_latest.zip"
-        echo "[>] Downloading Android commandline tools from $CMDLINE_TOOLS_DOWNLOAD_URL"
-        wget $CMDLINE_TOOLS_DOWNLOAD_URL -q --show-progress -P $APK_SH_HOME
-        unzip $APK_SH_HOME/commandlinetools-linux-9123335_latest.zip -d $APK_SH_HOME
-        rm $APK_SH_HOME/commandlinetools-linux-9123335_latest.zip
+	if [ "$IS_MACOS" -eq 1 ]; then
+		CMDLINE_TOOLS_DOWNLOAD_URL="https://dl.google.com/android/repository/commandlinetools-mac-9123335_latest.zip"
+		CMDLINE_TOOLS_ZIP="commandlinetools-mac-9123335_latest.zip"
+	else
+		CMDLINE_TOOLS_DOWNLOAD_URL="https://dl.google.com/android/repository/commandlinetools-linux-9123335_latest.zip"
+		CMDLINE_TOOLS_ZIP="commandlinetools-linux-9123335_latest.zip"
+	fi
+	echo "[>] Downloading Android commandline tools from $CMDLINE_TOOLS_DOWNLOAD_URL"
+	download_file "$CMDLINE_TOOLS_DOWNLOAD_URL" "$APK_SH_HOME"
+	unzip "$APK_SH_HOME/$CMDLINE_TOOLS_ZIP" -d "$APK_SH_HOME"
+	rm "$APK_SH_HOME/$CMDLINE_TOOLS_ZIP"
 	echo "[>] Done!"
 }
 
@@ -143,7 +215,7 @@ check_apk_tools(){
 		APKTOOL_DOWNLOAD_URL=$APKTOOL_DOWNLOAD_URL_GH
 		echo "[!] No apktool v$APKTOOL_VER found!"
 		echo "[>] Downloading apktool from $APKTOOL_DOWNLOAD_URL"
-		wget $APKTOOL_DOWNLOAD_URL -q --show-progress -P $APK_SH_HOME 
+		download_file "$APKTOOL_DOWNLOAD_URL" "$APK_SH_HOME"
 	fi
 	if  is_not_installed 'apksigner'; then
 		if [ ! -f "$APKSIGNER" ]; then
@@ -233,8 +305,9 @@ apk_build(){
 	BUILD_CMD_OPTS="$2"
 	BUILD_CMD_START="java -jar $APKTOOL_PATH b -d "
 	BUILD_CMD="$BUILD_CMD_START $APK_DIR $BUILD_CMD_OPTS"
-	APK_NAME=`echo $BUILD_CMD_OPTS | grep -Po "\-o \K.*?(?= )"`
-	if [ -z $APK_NAME ]; then
+	# Extract output filename: -o <filename> (portable, no grep -P)
+	APK_NAME=$(echo "$BUILD_CMD_OPTS" | sed -n 's/.*-o \([^ ]*\).*/\1/p')
+	if [ -z "$APK_NAME" ]; then
 		APK_NAME="$APK_DIR.apk"
 	fi
 	if [[ "$BUILD_CMD_OPTS" == *" -n "* || "$BUILD_CMD_OPTS" == *" -n" ]]; then
@@ -292,7 +365,8 @@ apk_patch(){
 	arm64=("arm64-v8a" "arm64")
 	x86=("x86")
 	x86_64=("x86_64")
-	GADGET_VER=`wget https://api.github.com/repos/frida/frida/releases/latest -q -O - | grep -Po "tag_name\": \"\K.*?(?=\")"`
+	# Get latest Frida version (portable - no grep -P)
+	GADGET_VER=$(download_stdout "https://api.github.com/repos/frida/frida/releases/latest" | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p')
 	GADGET_ARM="frida-gadget-$GADGET_VER-android-arm.so.xz"
 	GADGET_ARM64="frida-gadget-$GADGET_VER-android-arm64.so.xz"
 	GADGET_X86_64="frida-gadget-$GADGET_VER-android-x86_64.so.xz"
@@ -330,7 +404,7 @@ apk_patch(){
 		if [ ! -f "$FRIDA_SO_XZ" ]; then
 			echo "[!] Frida gadget not present in $APK_SH_HOME"
 			echo "[>] Downloading latest frida gadget for $ARCH from github.com..."
-			wget https://github.com/frida/frida/releases/download/$GADGET_VER/$GADGET -q --show-progress -P $APK_SH_HOME 
+			download_file "https://github.com/frida/frida/releases/download/$GADGET_VER/$GADGET" "$APK_SH_HOME"
 		fi
 		unxz "$FRIDA_SO_XZ"
 	else
@@ -357,7 +431,8 @@ apk_patch(){
 	# We have to determine the class name for the activity that is launched on application startup.
 	# In Objection this is done by first trying to parse the output of aapt dump badging, then falling back to manually parsing the AndroidManifest for activity-alias tags.
 	echo "[>] Searching for a launchable-activity..."
-	MAIN_ACTIVITY=`$AAPT dump badging $APK_NAME | grep launchable-activity | grep -Po "name='\K.*?(?=')"`
+	# Extract activity name (portable - no grep -P)
+	MAIN_ACTIVITY=$($AAPT dump badging "$APK_NAME" | grep launchable-activity | sed "s/.*name='\([^']*\)'.*/\1/")
 	echo "[>] launchable-activity found --> $MAIN_ACTIVITY"
 	# TODO: If we dont get the activity, we gonna check out activity aliases trying to manually parse the AndroidManifest.
 	# Try to determine the local path for a target class' smali converting the main activity to a path
@@ -414,7 +489,11 @@ apk_patch(){
         #
         echo "[>] $CLASS_PATH found!"
         echo "[>] Patching smali..."
-        readarray -t lines < $CLASS_PATH
+        # Read file into array (portable - works on macOS bash 3.x)
+        lines=()
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            lines+=("$line")
+        done < "$CLASS_PATH"
         index=0
         skip=1
         STATIC_CONSTRUCTOR_FOUND=0;
@@ -474,7 +553,11 @@ apk_patch(){
             echo "[?] Checking if Internet permission is present in the manifest..."
             INTERNET_PERMISSION=0
             MANIFEST_PATH="$APK_DIR/AndroidManifest.xml"
-            readarray -t manifest < $MANIFEST_PATH
+            # Read manifest into array (portable - works on macOS bash 3.x)
+            manifest=()
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                manifest+=("$line")
+            done < "$MANIFEST_PATH"
             for i in "${manifest[@]}"
             do
                 if [[ "$i" == *"<uses-permission android:name=\"android.permission.INTERNET\"/>"* ]]; then
@@ -497,12 +580,12 @@ apk_patch(){
             # Failure [INSTALL_FAILED_INVALID_APK: Failed to extract native libraries, res=-2]
             echo "[>] Enabling native libraries extraction if it was set to false..."
             # If the tag exist and is set to false, set it to true, otherwise do nothing
-            sed -i "s/android:extractNativeLibs=\"false\"/android:extractNativeLibs=\"true\"/g" $MANIFEST_PATH
+            sed_inplace "s/android:extractNativeLibs=\"false\"/android:extractNativeLibs=\"true\"/g" "$MANIFEST_PATH"
             echo "[>] Done!"
         fi #end NO_RES
     fi #end NO_DIS if
 
-	APKTOOL_BUILD_OPTS="-o $APK_DIR.gadget.apk --use-aapt2"
+	APKTOOL_BUILD_OPTS="-o $APK_DIR.gadget.apk"
 	APKTOOL_BUILD_OPTS="$APKTOOL_BUILD_OPTS $BUILD_OPTS"
 	apk_build "$APK_DIR" "$APKTOOL_BUILD_OPTS"
 	echo "[>] Bye!"
@@ -541,7 +624,7 @@ apk_pull(){
 			print_ $i
 			APK_NAME=$i
 			APK_DIR=${APK_NAME%.apk} # bash 3.x compliant xD
-			APKTOOL_DECODE_OPTS="--resource-mode dummy -o $APK_DIR 1>/dev/null"
+			APKTOOL_DECODE_OPTS="-resm dummy -o $APK_DIR 1>/dev/null"
 			apk_decode "$APK_NAME" "$APKTOOL_DECODE_OPTS"
 		done
 		# Walk the extracted APKs dirs and copy files and dirs to the base APK dir. 
@@ -568,7 +651,12 @@ apk_pull(){
 				# Copy files into the base APK, except for XML files in the res directory
 				if [[ $j == */res ]]; then
 					print_ "[.] /res direcorty found!":
-					(cd $j; find . -type f ! -name '*.xml' -exec cp --parents {} ../../base/res/ \;)# -exec echo '[+] Copying res that are not xml {}'\;)    
+					# Portable cp with parent directories (macOS doesn't have cp --parents)
+					(cd "$j"; find . -type f ! -name '*.xml' | while read -r file; do
+						dest_dir="../../base/res/$(dirname "$file")"
+						mkdir -p "$dest_dir"
+						cp "$file" "$dest_dir/"
+					done)
 					continue
 				fi
 				print_ "[>] Copying directory cp -R $j in $SPLIT_DIR/base/ ...."
@@ -580,7 +668,8 @@ apk_pull(){
 
 		# Fix public resource identifiers. 
 		# Find all resource IDs with name APKTOOOL_DUMMY_xxx in the base dir
-		DUMMY_IDS=`grep "APKTOOL_DUMMY_" $SPLIT_DIR"/base/res/values/public.xml" | grep -Po "id=\"\K.*?(?=\")" | grep 0x`
+		# Extract id values (portable - no grep -P)
+		DUMMY_IDS=$(grep "APKTOOL_DUMMY_" "$SPLIT_DIR/base/res/values/public.xml" | sed 's/.*id="\([^"]*\)".*/\1/' | grep 0x)
 		stra=($DUMMY_IDS)
 		ITER=1
 		TOTAL=${#stra[@]}
@@ -588,18 +677,18 @@ apk_pull(){
 		for j in "${stra[@]}"
 		do
 			print_ "[~] ("$ITER"/"$TOTAL") DUMMY_ID_TO_FIX: "$j
-			# Get the dummy name grepping for the resource ID
-			DUMMY_NAME=`grep "$j" $SPLIT_DIR/base/res/values/public.xml | grep DUMMY | grep -Po "name=\"\K.*?(?=\")"`
+			# Get the dummy name grepping for the resource ID (portable - no grep -P)
+			DUMMY_NAME=$(grep "$j" "$SPLIT_DIR/base/res/values/public.xml" | grep DUMMY | sed 's/.*name="\([^"]*\)".*/\1/')
 			print_ "[~] ("$ITER"/"$TOTAL") DUMMY_NAME: "$DUMMY_NAME
-			# Get the real resource name grepping for the resource ID in each spit APK
-			REAL_NAME=`grep "$j" $SPLIT_DIR/*/res/values/public.xml | grep -v DUMMY | grep -v base | grep name | grep -Po "name=\"\K.*?(?=\")"`
+			# Get the real resource name grepping for the resource ID in each split APK (portable - no grep -P)
+			REAL_NAME=$(grep "$j" $SPLIT_DIR/*/res/values/public.xml | grep -v DUMMY | grep -v base | grep name | sed 's/.*name="\([^"]*\)".*/\1/')
 			print_ "[~] ("$ITER"/"$TOTAL") REAL_NAME: "$REAL_NAME
 			echo "s/\<$DUMMY_NAME\>/$REAL_NAME/g" >> $SPLIT_DIR"/DUMMY_REPLACEMENT.txt"
 			print_ "---"
 			ITER=$(expr $ITER + 1)
 		done
 		echo "[>] - Replace DUMMY_NAME/REAL_NAME in all base.apk xml files containing APKTOOL_DUMMY_"
-		grep -rl "APKTOOL_DUMMY_" --include "*\.xml" $SPLIT_DIR"/base" | xargs sed -i -f $SPLIT_DIR"/DUMMY_REPLACEMENT.txt"
+		grep -rl "APKTOOL_DUMMY_" --include "*\.xml" $SPLIT_DIR"/base" | xargs_sed_inplace "$SPLIT_DIR/DUMMY_REPLACEMENT.txt"
 		rm $SPLIT_DIR"/DUMMY_REPLACEMENT.txt"
 		echo "[>] Done!"
 
@@ -607,18 +696,18 @@ apk_pull(){
 		MANIFEST_PATH="$SPLIT_DIR/base/AndroidManifest.xml"
 		echo "[>] Disabling APK splitting :"
   		echo "[>] - Make sure isSplitRequired is set to false"
-		sed -i "s/android:isSplitRequired=\"true\"/android:isSplitRequired=\"false\"/g" $MANIFEST_PATH
+		sed_inplace "s/android:isSplitRequired=\"true\"/android:isSplitRequired=\"false\"/g" "$MANIFEST_PATH"
   		echo "[>] - Make sure com.android.vending.splits.required is set to false"
-  		sed -i "/com.android.vending.splits.required/s/true/false/g" $MANIFEST_PATH
+  		sed_inplace "/com.android.vending.splits.required/s/true/false/g" "$MANIFEST_PATH"
 		echo "[>] Done!"
 		#	Set android:extractNativeLibs="true" in the Manifest if you experience any adb: failed to install file.gadget.apk:
 		#	Failure [INSTALL_FAILED_INVALID_APK: Failed to extract native libraries, res=-2]
 		echo "[>] Enabling native libraries extraction if it was set to false..."
 		# If the tag exist and is set to false, set it to true, otherwise do nothing
-		sed -i "s/android:extractNativeLibs=\"false\"/android:extractNativeLibs=\"true\"/g" $MANIFEST_PATH
+		sed_inplace "s/android:extractNativeLibs=\"false\"/android:extractNativeLibs=\"true\"/g" "$MANIFEST_PATH"
 		echo "[>] Done!"
 		# Rebuild the base APK 
-		APKTOOL_BUILD_OPTS="-o file.single.apk --use-aapt2"
+		APKTOOL_BUILD_OPTS="-o file.single.apk"
 		APKTOOL_BUILD_OPTS="$APKTOOL_BUILD_OPTS $BUILD_OPTS"
 		apk_build "$SPLIT_DIR/base" "$APKTOOL_BUILD_OPTS"
 		echo "[>] Bye!"
@@ -645,8 +734,8 @@ apk_rename(){
 	echo "[>] Updating renameManifestPackage in apktool.yml with $PACKAGE"
 	# Note: https://github.com/iBotPeaches/Apktool/issues/1753
 	# renameManifestPackage is not designed for manual package name changes, but can be useful in some situations.
-	sed -i "s/renameManifestPackage:.*/renameManifestPackage: $PACKAGE/g" $APKTOOL_YML_PATH
-	APKTOOL_BUILD_OPTS="-o file.renamed.apk --use-aapt2"
+	sed_inplace "s/renameManifestPackage:.*/renameManifestPackage: $PACKAGE/g" "$APKTOOL_YML_PATH"
+	APKTOOL_BUILD_OPTS="-o file.renamed.apk"
 	APKTOOL_BUILD_OPTS="$APKTOOL_BUILD_OPTS $BUILD_OPTS"
 	# Silently build
 	apk_build "$APK_DIR" "$APKTOOL_BUILD_OPTS 1>/dev/null"
@@ -677,8 +766,8 @@ if [ ! -z $1 ]&&[ $1 == "build" ]; then
 	#
 	APK_DIR=$2
 	exit_if_not_exist "$APK_DIR"
-	APKTOOL_BUILD_OPTS="-o file.apk --use-aapt2"
-	#APKTOOL_BUILD_OPTS="--use-aapt2"
+	APKTOOL_BUILD_OPTS="-o file.apk"
+	#APKTOOL_BUILD_OPTS=""
 	shift # pop SUBCOMMAND
 	shift # pop SUBCOMMAND_ARG
 	while [[ $# -gt 0 ]]; do

@@ -1,0 +1,38 @@
+# APK files and related artifacts
+*.apk
+*.idsig
+*.apk-aligned.apk.idsig
+
+# Decoded/extracted APK directories
+*_split_apks/
+*.out/
+
+# Common decoded APK directory patterns
+file.single/
+file.renamed/
+file.gadget/
+
+# Package directories (com.*, org.*, etc.)
+com.*/
+org.*/
+net.*/
+io.*/
+
+# Build artifacts
+dist/
+build/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Keystore (sensitive - do not commit)
+*.keystore
+*.jks
